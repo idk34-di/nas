@@ -1,0 +1,292 @@
+#include <WiFi.h>
+#include <WebServer.h>
+#include <ESPmDNS.h>
+#include <SPI.h>
+#include <SD.h>
+
+// ---- Pin SD (adatta al tuo ESP32) ----
+#define SD_SCK  12
+#define SD_MISO 13
+#define SD_MOSI 11
+#define SD_CS   10
+
+// ---- WiFi di casa ----
+const char* WIFI_SSID = "NOME_WIFI";
+const char* WIFI_PASS = "PASSWORD_WIFI";
+
+// ---- WiFi di riserva (se quello di casa non si trova) ----
+const char* AP_SSID = "ESP-NAS";
+const char* AP_PASS = "12345678";
+
+// ---- Login sito ----
+const char* USER = "admin";
+const char* PASS = "1234";   // cambiala!
+
+WebServer server(80);
+File upFile;
+bool uploadOk = false;
+
+const char INDEX_HTML[] PROGMEM = R"rawliteral(
+<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ESP NAS</title>
+<style>
+  body{font-family:system-ui,sans-serif;background:#0f1115;color:#e8e8e8;margin:0;padding:16px;max-width:680px;margin:auto}
+  h1{font-size:22px}
+  button,input{font:inherit;padding:10px 14px;border-radius:10px;border:1px solid #333;background:#1b1f27;color:#e8e8e8}
+  button{cursor:pointer;background:#2b6cff;border:none}
+  button.sec{background:#2a2f3a}
+  button.del{background:#c0392b}
+  .row{display:flex;gap:8px;margin:10px 0;flex-wrap:wrap;align-items:center}
+  .file{display:flex;align-items:center;gap:8px;background:#1b1f27;border-radius:10px;padding:10px;margin:6px 0}
+  .file a{flex:1;color:#8ab4ff;text-decoration:none;word-break:break-all}
+  .file small{opacity:.7;white-space:nowrap}
+  .bar{height:8px;background:#2a2f3a;border-radius:6px;overflow:hidden;margin:6px 0}
+  .bar>div{height:100%;width:0;background:#2b6cff}
+  #status{font-size:14px;opacity:.8;margin:8px 0}
+  #drop{border:2px dashed #3a4150;border-radius:12px;padding:18px;text-align:center;opacity:.8}
+  #drop.over{border-color:#2b6cff;opacity:1}
+</style>
+</head>
+<body>
+<h1>📦 ESP NAS</h1>
+<div id="space"></div>
+<div class="bar"><div id="spaceBar"></div></div>
+
+<div id="drop">Trascina qui i file oppure scegli sotto</div>
+<div class="row">
+  <input id="fileInput" type="file" multiple>
+  <button id="btnUpload">Carica</button>
+  <button id="btnRefresh" class="sec">Aggiorna</button>
+</div>
+<div class="bar"><div id="progress"></div></div>
+<div id="status">Pronto</div>
+<div id="files"></div>
+
+<script>
+const $=id=>document.getElementById(id);
+const fmt=b=>b<1024?b+' B':b<1048576?(b/1024).toFixed(1)+' KB':b<1073741824?(b/1048576).toFixed(1)+' MB':(b/1073741824).toFixed(2)+' GB';
+const status=t=>$('status').textContent=t;
+let queue=[];
+
+async function refresh(){
+  const r=await fetch('/api/list'); const j=await r.json();
+  $('space').textContent='Spazio: '+fmt(j.used)+' / '+fmt(j.total);
+  $('spaceBar').style.width=(j.total?j.used/j.total*100:0)+'%';
+  const box=$('files'); box.innerHTML='';
+  j.files.forEach(f=>{
+    const d=document.createElement('div'); d.className='file';
+    const a=document.createElement('a'); a.textContent=f.n;
+    a.href='/api/file?n='+encodeURIComponent(f.n); a.target='_blank';
+    const s=document.createElement('small'); s.textContent=fmt(f.s);
+    const dl=document.createElement('button'); dl.textContent='⬇'; dl.className='sec';
+    dl.onclick=()=>{const x=document.createElement('a');x.href='/api/file?n='+encodeURIComponent(f.n)+'&dl=1';x.click();};
+    const del=document.createElement('button'); del.textContent='🗑'; del.className='del';
+    del.onclick=async()=>{ if(confirm('Eliminare '+f.n+'?')){ await fetch('/api/del?n='+encodeURIComponent(f.n),{method:'POST'}); refresh(); } };
+    d.append(a,s,dl,del); box.append(d);
+  });
+}
+
+function uploadOne(file,idx,tot){
+  return new Promise((res,rej)=>{
+    const fd=new FormData(); fd.append('f',file,file.name);
+    const x=new XMLHttpRequest();
+    x.open('POST','/api/upload');
+    x.upload.onprogress=e=>{
+      if(e.lengthComputable){
+        $('progress').style.width=(e.loaded/e.total*100)+'%';
+        status(`(${idx}/${tot}) ${file.name}: ${(e.loaded/e.total*100).toFixed(0)}%`);
+      }
+    };
+    x.onload=()=>x.status===200?res():rej(new Error(x.responseText||'Errore '+x.status));
+    x.onerror=()=>rej(new Error('Errore di rete'));
+    x.send(fd);
+  });
+}
+
+async function startUpload(files){
+  files=[...files];
+  if(!files.length) return status('Scegli almeno un file');
+  try{
+    for(let i=0;i<files.length;i++) await uploadOne(files[i],i+1,files.length);
+    status('Upload completato ✅');
+  }catch(e){ status('Errore: '+e.message); }
+  $('progress').style.width='0';
+  refresh();
+}
+
+$('btnUpload').onclick=()=>startUpload($('fileInput').files);
+$('btnRefresh').onclick=refresh;
+const drop=$('drop');
+drop.ondragover=e=>{e.preventDefault();drop.classList.add('over');};
+drop.ondragleave=()=>drop.classList.remove('over');
+drop.ondrop=e=>{e.preventDefault();drop.classList.remove('over');startUpload(e.dataTransfer.files);};
+refresh();
+</script>
+</body>
+</html>
+)rawliteral";
+
+// ---------- Utility ----------
+bool auth() {
+  if (!server.authenticate(USER, PASS)) {
+    server.requestAuthentication();
+    return false;
+  }
+  return true;
+}
+
+String cleanName(String n) {
+  int i = max(n.lastIndexOf('/'), n.lastIndexOf('\\'));
+  if (i >= 0) n = n.substring(i + 1);
+  const char bad[] = "\"<>|:*?";
+  for (size_t k = 0; k < sizeof(bad) - 1; k++) n.replace(String(bad[k]), "_");
+  n.trim();
+  if (n.length() == 0 || n.length() > 100 || n[0] == '.') return "";
+  return n;
+}
+
+String jsonEscape(const String& s) {
+  String o;
+  for (size_t i = 0; i < s.length(); i++) {
+    char c = s[i];
+    if (c == '"' || c == '\\') o += '\\';
+    o += c;
+  }
+  return o;
+}
+
+String mimeOf(const String& n) {
+  String l = n; l.toLowerCase();
+  if (l.endsWith(".jpg") || l.endsWith(".jpeg")) return "image/jpeg";
+  if (l.endsWith(".png"))  return "image/png";
+  if (l.endsWith(".gif"))  return "image/gif";
+  if (l.endsWith(".webp")) return "image/webp";
+  if (l.endsWith(".mp4"))  return "video/mp4";
+  if (l.endsWith(".webm")) return "video/webm";
+  if (l.endsWith(".mp3"))  return "audio/mpeg";
+  if (l.endsWith(".wav"))  return "audio/wav";
+  if (l.endsWith(".ogg"))  return "audio/ogg";
+  if (l.endsWith(".pdf"))  return "application/pdf";
+  if (l.endsWith(".txt"))  return "text/plain";
+  return "application/octet-stream";
+}
+
+// ---------- Route ----------
+void handleRoot() {
+  if (!auth()) return;
+  server.send_P(200, "text/html; charset=utf-8", INDEX_HTML);
+}
+
+void handleList() {
+  if (!auth()) return;
+  String j = "{\"total\":" + String((uint64_t)SD.totalBytes()) +
+             ",\"used\":" + String((uint64_t)SD.usedBytes()) + ",\"files\":[";
+  File root = SD.open("/");
+  File f = root.openNextFile();
+  bool first = true;
+  while (f) {
+    String n = f.name();
+    if (!f.isDirectory() && n.length() && n[0] != '.') {
+      if (!first) j += ",";
+      first = false;
+      j += "{\"n\":\"" + jsonEscape(n) + "\",\"s\":" + String((uint32_t)f.size()) + "}";
+    }
+    f = root.openNextFile();
+  }
+  root.close();
+  j += "]}";
+  server.send(200, "application/json", j);
+}
+
+void handleFile() {
+  if (!auth()) return;
+  String n = cleanName(server.arg("n"));
+  if (n == "") { server.send(400, "text/plain", "Nome non valido"); return; }
+  File f = SD.open("/" + n, FILE_READ);
+  if (!f) { server.send(404, "text/plain", "Non trovato"); return; }
+  if (server.hasArg("dl"))
+    server.sendHeader("Content-Disposition", "attachment; filename=\"" + n + "\"");
+  server.streamFile(f, mimeOf(n));
+  f.close();
+}
+
+void handleDelete() {
+  if (!auth()) return;
+  String n = cleanName(server.arg("n"));
+  if (n != "" && SD.remove("/" + n)) server.send(200, "text/plain", "OK");
+  else server.send(400, "text/plain", "Errore");
+}
+
+void handleUploadDone() {
+  if (!uploadOk) { server.send(403, "text/plain", "Non autorizzato o nome non valido"); return; }
+  server.send(200, "text/plain", "OK");
+}
+
+void handleUploadData() {
+  HTTPUpload& u = server.upload();
+  if (u.status == UPLOAD_FILE_START) {
+    uploadOk = false;
+    if (!server.authenticate(USER, PASS)) return;
+    String n = cleanName(u.filename);
+    if (n == "") return;
+    SD.remove("/" + n);
+    upFile = SD.open("/" + n, FILE_WRITE);
+    uploadOk = (bool)upFile;
+  } else if (u.status == UPLOAD_FILE_WRITE) {
+    if (uploadOk && upFile) upFile.write(u.buf, u.currentSize);
+  } else if (u.status == UPLOAD_FILE_END) {
+    if (upFile) upFile.close();
+  } else if (u.status == UPLOAD_FILE_ABORTED) {
+    if (upFile) upFile.close();
+    uploadOk = false;
+  }
+}
+
+// ---------- Setup ----------
+void setup() {
+  Serial.begin(115200);
+  delay(500);
+
+  SPI.begin(SD_SCK, SD_MISO, SD_MOSI, SD_CS);
+  if (!SD.begin(SD_CS, SPI, 20000000)) Serial.println("SD non trovata!");
+
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(WIFI_SSID, WIFI_PASS);
+  Serial.print("Connessione WiFi");
+  uint32_t t0 = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - t0 < 10000) {
+    delay(300);
+    Serial.print(".");
+  }
+  Serial.println();
+
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.print("Aperto su: http://");
+    Serial.println(WiFi.localIP());
+  } else {
+    WiFi.mode(WIFI_AP);
+    WiFi.softAP(AP_SSID, AP_PASS);
+    Serial.print("Modalità AP, indirizzo: http://");
+    Serial.println(WiFi.softAPIP());
+  }
+
+  if (MDNS.begin("esp-nas")) Serial.println("Anche su: http://esp-nas.local");
+
+  const char* hdrs[] = {"Authorization"};
+  server.collectHeaders(hdrs, 1);
+
+  server.on("/", HTTP_GET, handleRoot);
+  server.on("/api/list", HTTP_GET, handleList);
+  server.on("/api/file", HTTP_GET, handleFile);
+  server.on("/api/del", HTTP_POST, handleDelete);
+  server.on("/api/upload", HTTP_POST, handleUploadDone, handleUploadData);
+  server.begin();
+}
+
+void loop() {
+  server.handleClient();
+}
