@@ -1,292 +1,351 @@
-#include <WiFi.h>
-#include <WebServer.h>
-#include <ESPmDNS.h>
-#include <SPI.h>
-#include <SD.h>
-
-// ---- Pin SD (adatta al tuo ESP32) ----
-#define SD_SCK  12
-#define SD_MISO 13
-#define SD_MOSI 11
-#define SD_CS   10
-
-// ---- WiFi di casa ----
-const char* WIFI_SSID = "NOME_WIFI";
-const char* WIFI_PASS = "PASSWORD_WIFI";
-
-// ---- WiFi di riserva (se quello di casa non si trova) ----
-const char* AP_SSID = "ESP-NAS";
-const char* AP_PASS = "12345678";
-
-// ---- Login sito ----
-const char* USER = "admin";
-const char* PASS = "1234";   // cambiala!
-
-WebServer server(80);
-File upFile;
-bool uploadOk = false;
-
-const char INDEX_HTML[] PROGMEM = R"rawliteral(
 <!DOCTYPE html>
 <html lang="it">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>ESP NAS</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>NAS</title>
 <style>
-  body{font-family:system-ui,sans-serif;background:#0f1115;color:#e8e8e8;margin:0;padding:16px;max-width:680px;margin:auto}
-  h1{font-size:22px}
-  button,input{font:inherit;padding:10px 14px;border-radius:10px;border:1px solid #333;background:#1b1f27;color:#e8e8e8}
-  button{cursor:pointer;background:#2b6cff;border:none}
-  button.sec{background:#2a2f3a}
-  button.del{background:#c0392b}
-  .row{display:flex;gap:8px;margin:10px 0;flex-wrap:wrap;align-items:center}
-  .file{display:flex;align-items:center;gap:8px;background:#1b1f27;border-radius:10px;padding:10px;margin:6px 0}
-  .file a{flex:1;color:#8ab4ff;text-decoration:none;word-break:break-all}
-  .file small{opacity:.7;white-space:nowrap}
-  .bar{height:8px;background:#2a2f3a;border-radius:6px;overflow:hidden;margin:6px 0}
-  .bar>div{height:100%;width:0;background:#2b6cff}
-  #status{font-size:14px;opacity:.8;margin:8px 0}
-  #drop{border:2px dashed #3a4150;border-radius:12px;padding:18px;text-align:center;opacity:.8}
-  #drop.over{border-color:#2b6cff;opacity:1}
+  @import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Rajdhani:wght@400;500;600&display=swap');
+
+  :root {
+    --bg:#0a0e14; --surface:#111820; --surface2:#1a2330; --border:#1e3040;
+    --accent:#5bc8e8; --accent2:#00ff88; --accent3:#ff6b6b;
+    --text:#c8dce8; --text2:#4a7090; --pad-text:#001a28;
+    --font-mono:'Share Tech Mono',monospace; --font-ui:'Rajdhani',sans-serif;
+  }
+  * { box-sizing:border-box; margin:0; padding:0; }
+  body { background:var(--bg); color:var(--text); font-family:var(--font-ui); min-height:100vh; transition:background .4s,color .4s; }
+
+  header {
+    display:flex; align-items:center; justify-content:space-between;
+    padding:1rem 1.5rem; border-bottom:1px solid var(--border);
+    background:var(--surface); position:relative;
+  }
+  .header-center {
+    position:absolute; left:50%; top:50%; transform:translate(-50%,-50%);
+    font-family:var(--font-mono); font-size:13px; letter-spacing:4px; color:var(--accent);
+    text-decoration:none; white-space:nowrap;
+  }
+  .header-right { display:flex; align-items:center; gap:10px; }
+  .theme-picker { display:flex; gap:6px; align-items:center; }
+  .theme-dot { width:18px; height:18px; border-radius:50%; cursor:pointer; border:2px solid transparent; transition:transform .15s; }
+  .theme-dot:hover { transform:scale(1.25); }
+  .theme-dot.active { border-color:var(--text); transform:scale(1.2); }
+
+  main { max-width:1000px; margin:0 auto; padding:1.5rem 1rem; display:flex; flex-direction:column; gap:1rem; }
+
+  .box { background:var(--surface); border:1px solid var(--border); border-radius:4px; padding:1.25rem; }
+  .title { font-family:var(--font-mono); font-size:11px; color:var(--accent); letter-spacing:2px; margin-bottom:.75rem; }
+
+  .btn {
+    padding:7px 16px; border-radius:2px; border:1px solid var(--border); background:transparent;
+    color:var(--text); font-family:var(--font-mono); font-size:11px; cursor:pointer; letter-spacing:1px; transition:all .1s;
+  }
+  .btn:hover { border-color:var(--accent); color:var(--accent); }
+  .btn.primary { border-color:var(--accent); color:var(--accent); }
+  .btn.primary:hover { background:var(--accent); color:var(--pad-text); }
+  .btn.danger { border-color:var(--accent3); color:var(--accent3); }
+  .btn.danger:hover { background:var(--accent3); color:#fff; }
+
+  .drop {
+    border:2px dashed var(--border); border-radius:4px; padding:2rem 1rem; text-align:center;
+    font-family:var(--font-mono); font-size:12px; color:var(--text2); cursor:pointer; transition:all .15s;
+  }
+  .drop:hover, .drop.over { border-color:var(--accent); color:var(--accent); background:var(--surface2); }
+
+  .uploads { display:flex; flex-direction:column; gap:6px; margin-top:.75rem; }
+  .up-item { background:var(--surface2); border:1px solid var(--border); border-radius:3px; padding:6px 10px; }
+  .up-top { display:flex; justify-content:space-between; font-family:var(--font-mono); font-size:10px; color:var(--text); margin-bottom:4px; gap:10px; }
+  .up-top span:first-child { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .bar { height:4px; background:var(--border); border-radius:2px; overflow:hidden; }
+  .bar > div { height:100%; width:0; background:var(--accent2); transition:width .15s; }
+
+  .stats { display:flex; justify-content:space-between; font-family:var(--font-mono); font-size:10px; color:var(--text2); margin-bottom:.75rem; flex-wrap:wrap; gap:6px; }
+
+  .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(150px,1fr)); gap:8px; }
+  .thumb {
+    aspect-ratio:1; border-radius:3px; border:1px solid var(--border); background:var(--surface2);
+    overflow:hidden; cursor:pointer; position:relative; transition:transform .1s,border-color .1s;
+  }
+  .thumb:hover { border-color:var(--accent); transform:scale(1.02); }
+  .thumb img { width:100%; height:100%; object-fit:cover; display:block; }
+  .thumb .ico { display:flex; height:100%; align-items:center; justify-content:center; font-size:32px; }
+  .thumb .cap {
+    position:absolute; left:0; right:0; bottom:0; padding:3px 6px; background:rgba(0,0,0,.65);
+    font-family:var(--font-mono); font-size:9px; color:#fff; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+  }
+  .empty { font-family:var(--font-mono); font-size:11px; color:var(--text2); padding:1rem 0; text-align:center; }
+
+  .lightbox {
+    position:fixed; inset:0; background:rgba(0,0,0,.92); z-index:1000; display:none;
+    flex-direction:column; align-items:center; justify-content:center; padding:1rem; gap:12px;
+  }
+  .lightbox.show { display:flex; }
+  .lightbox img, .lightbox video { max-width:100%; max-height:78vh; border-radius:3px; }
+  .lb-info { font-family:var(--font-mono); font-size:11px; color:var(--text); text-align:center; }
+  .lb-btns { display:flex; gap:8px; flex-wrap:wrap; justify-content:center; }
+
+  .toast {
+    position:fixed; bottom:24px; left:50%; transform:translateX(-50%) translateY(60px);
+    background:var(--accent); color:var(--pad-text); font-family:var(--font-mono); font-size:11px;
+    letter-spacing:1px; padding:10px 20px; border-radius:3px; z-index:9999; transition:transform .3s; white-space:nowrap;
+  }
+  .toast.show { transform:translateX(-50%) translateY(0); }
+  .toast.error { background:var(--accent3); color:#fff; }
+
+  .locked { text-align:center; font-family:var(--font-mono); font-size:12px; color:var(--text2); padding:2rem 0; }
+
+  @media (max-width:500px) {
+    .header-center { font-size:10px; letter-spacing:2px; }
+    .grid { grid-template-columns:repeat(auto-fill,minmax(105px,1fr)); }
+  }
 </style>
 </head>
 <body>
-<h1>📦 ESP NAS</h1>
-<div id="space"></div>
-<div class="bar"><div id="spaceBar"></div></div>
 
-<div id="drop">Trascina qui i file oppure scegli sotto</div>
-<div class="row">
-  <input id="fileInput" type="file" multiple>
-  <button id="btnUpload">Carica</button>
-  <button id="btnRefresh" class="sec">Aggiorna</button>
+<div class="toast" id="toast"></div>
+
+<div class="lightbox" id="lightbox" onclick="if(event.target===this)chiudiLB()">
+  <div id="lb-media"></div>
+  <div class="lb-info" id="lb-info"></div>
+  <div class="lb-btns">
+    <a class="btn primary" id="lb-open" target="_blank" rel="noopener" style="text-decoration:none">↗ APRI ORIGINALE</a>
+    <button class="btn danger" onclick="eliminaCorrente()">✕ ELIMINA</button>
+    <button class="btn" onclick="chiudiLB()">CHIUDI</button>
+  </div>
 </div>
-<div class="bar"><div id="progress"></div></div>
-<div id="status">Pronto</div>
-<div id="files"></div>
 
+<header>
+  <div class="theme-picker" id="theme-dots"></div>
+  <a class="header-center" href="https://idk34-di.github.io/" target="_blank" rel="noopener">NAS</a>
+  <div class="header-right">
+    <button id="login-btn" class="btn" onclick="accedi()">ACCEDI</button>
+    <span id="user-info" style="display:none;color:var(--accent2);cursor:pointer;font-family:var(--font-mono);font-size:11px;" onclick="esci()"></span>
+  </div>
+</header>
+
+<main>
+  <div id="locked" class="box locked">🔒 Accedi con Google per usare il tuo NAS</div>
+
+  <div id="app" style="display:none;flex-direction:column;gap:1rem;">
+    <div class="box">
+      <div class="title">↑ CARICA FILE</div>
+      <div class="drop" id="drop" onclick="document.getElementById('file-input').click()">
+        Trascina qui foto/video oppure tocca per sceglierli<br>
+        <span style="font-size:10px">Vengono salvati in qualità originale, senza compressione</span>
+      </div>
+      <input type="file" id="file-input" accept="image/*,video/*" multiple style="display:none" onchange="caricaFiles(this.files);this.value=''">
+      <div class="uploads" id="uploads"></div>
+    </div>
+
+    <div class="box">
+      <div class="title">▦ LE MIE FOTO</div>
+      <div class="stats"><span id="stat-count">0 file</span><span id="stat-size">0 MB</span></div>
+      <div class="grid" id="grid"></div>
+    </div>
+  </div>
+</main>
+
+<script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-firestore-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-storage-compat.js"></script>
 <script>
-const $=id=>document.getElementById(id);
-const fmt=b=>b<1024?b+' B':b<1048576?(b/1024).toFixed(1)+' KB':b<1073741824?(b/1048576).toFixed(1)+' MB':(b/1073741824).toFixed(2)+' GB';
-const status=t=>$('status').textContent=t;
-let queue=[];
+// ═══════════════ TEMI ═══════════════
+const THEMES = [
+  { name:'Cyan Night',  dot:'#5bc8e8', vars:{'--bg':'#0a0e14','--surface':'#111820','--surface2':'#1a2330','--border':'#1e3040','--accent':'#5bc8e8','--accent2':'#00ff88','--accent3':'#ff6b6b','--text':'#c8dce8','--text2':'#4a7090','--pad-text':'#001a28'}},
+  { name:'Purple Haze', dot:'#b06ef3', vars:{'--bg':'#0d0814','--surface':'#160e20','--surface2':'#1f1530','--border':'#2d1f45','--accent':'#b06ef3','--accent2':'#f06edf','--accent3':'#ff6b6b','--text':'#d8c8f0','--text2':'#5a3a80','--pad-text':'#0d0814'}},
+  { name:'Sunset',      dot:'#ff8c42', vars:{'--bg':'#14080a','--surface':'#201010','--surface2':'#301818','--border':'#451f1f','--accent':'#ff8c42','--accent2':'#ffd166','--accent3':'#ef476f','--text':'#f0d8c8','--text2':'#804030','--pad-text':'#14080a'}},
+  { name:'Matrix',      dot:'#00ff41', vars:{'--bg':'#000000','--surface':'#030f03','--surface2':'#071807','--border':'#0a280a','--accent':'#00ff41','--accent2':'#00cc33','--accent3':'#ff0000','--text':'#a0ffb0','--text2':'#1a5a1a','--pad-text':'#000000'}},
+];
+let activeTheme = 0;
+function applyTheme(i){
+  activeTheme = i;
+  for (const [k,v] of Object.entries(THEMES[i].vars)) document.documentElement.style.setProperty(k,v);
+  document.querySelectorAll('.theme-dot').forEach((d,n)=>d.classList.toggle('active',n===i));
+  localStorage.setItem('nasTheme', i);
+}
+document.getElementById('theme-dots').innerHTML = THEMES.map((t,i)=>
+  `<div class="theme-dot" style="background:${t.dot}" title="${t.name}" onclick="applyTheme(${i})"></div>`).join('');
+applyTheme(parseInt(localStorage.getItem('nasTheme')||'0'));
 
-async function refresh(){
-  const r=await fetch('/api/list'); const j=await r.json();
-  $('space').textContent='Spazio: '+fmt(j.used)+' / '+fmt(j.total);
-  $('spaceBar').style.width=(j.total?j.used/j.total*100:0)+'%';
-  const box=$('files'); box.innerHTML='';
-  j.files.forEach(f=>{
-    const d=document.createElement('div'); d.className='file';
-    const a=document.createElement('a'); a.textContent=f.n;
-    a.href='/api/file?n='+encodeURIComponent(f.n); a.target='_blank';
-    const s=document.createElement('small'); s.textContent=fmt(f.s);
-    const dl=document.createElement('button'); dl.textContent='⬇'; dl.className='sec';
-    dl.onclick=()=>{const x=document.createElement('a');x.href='/api/file?n='+encodeURIComponent(f.n)+'&dl=1';x.click();};
-    const del=document.createElement('button'); del.textContent='🗑'; del.className='del';
-    del.onclick=async()=>{ if(confirm('Eliminare '+f.n+'?')){ await fetch('/api/del?n='+encodeURIComponent(f.n),{method:'POST'}); refresh(); } };
-    d.append(a,s,dl,del); box.append(d);
-  });
+// ═══════════════ TOAST ═══════════════
+let toastTimer=null;
+function showToast(msg,err=false){
+  const el=document.getElementById('toast'); el.textContent=msg;
+  el.className='toast show'+(err?' error':'');
+  clearTimeout(toastTimer); toastTimer=setTimeout(()=>el.className='toast',2500);
 }
 
-function uploadOne(file,idx,tot){
-  return new Promise((res,rej)=>{
-    const fd=new FormData(); fd.append('f',file,file.name);
-    const x=new XMLHttpRequest();
-    x.open('POST','/api/upload');
-    x.upload.onprogress=e=>{
-      if(e.lengthComputable){
-        $('progress').style.width=(e.loaded/e.total*100)+'%';
-        status(`(${idx}/${tot}) ${file.name}: ${(e.loaded/e.total*100).toFixed(0)}%`);
-      }
+// ═══════════════ FIREBASE ═══════════════
+const firebaseConfig = {
+  apiKey: "AIzaSyA0-O7pTF_M_DmJ2mkvlGqkJuoD5Lc_WjE",
+  authDomain: "workspace-5e87a.firebaseapp.com",
+  projectId: "workspace-5e87a",
+  storageBucket: "workspace-5e87a.firebasestorage.app" // copia il valore esatto dalla console Firebase > Storage
+};
+firebase.initializeApp(firebaseConfig);
+const auth = firebase.auth();
+const db = firebase.firestore();
+const storage = firebase.storage();
+
+let utente = null, files = [], unsub = null, corrente = null;
+
+function accedi(){
+  auth.signInWithPopup(new firebase.auth.GoogleAuthProvider())
+    .catch(e=>{ console.error(e); showToast('LOGIN FALLITO',true); });
+}
+function esci(){ auth.signOut(); }
+
+auth.onAuthStateChanged(user=>{
+  utente = user;
+  document.getElementById('login-btn').style.display = user ? 'none' : '';
+  document.getElementById('user-info').style.display = user ? '' : 'none';
+  document.getElementById('locked').style.display = user ? 'none' : '';
+  document.getElementById('app').style.display = user ? 'flex' : 'none';
+  if (unsub) { unsub(); unsub = null; }
+  if (user) {
+    document.getElementById('user-info').textContent = user.displayName || user.email;
+    unsub = db.collection('utenti').doc(user.uid).collection('nas')
+      .orderBy('date','desc')
+      .onSnapshot(snap=>{
+        files = snap.docs.map(d=>({id:d.id,...d.data()}));
+        renderGrid();
+      }, e=>{ console.error(e); showToast('ERRORE LETTURA',true); });
+  } else { files = []; renderGrid(); }
+});
+
+// ═══════════════ UPLOAD ═══════════════
+const drop = document.getElementById('drop');
+['dragenter','dragover'].forEach(ev=>drop.addEventListener(ev,e=>{e.preventDefault();drop.classList.add('over');}));
+['dragleave','drop'].forEach(ev=>drop.addEventListener(ev,e=>{e.preventDefault();drop.classList.remove('over');}));
+drop.addEventListener('drop',e=>caricaFiles(e.dataTransfer.files));
+
+function fmtSize(b){
+  if (b<1024) return b+' B';
+  if (b<1048576) return (b/1024).toFixed(1)+' KB';
+  if (b<1073741824) return (b/1048576).toFixed(1)+' MB';
+  return (b/1073741824).toFixed(2)+' GB';
+}
+
+// miniatura leggera SOLO per la griglia (l'originale non viene toccato)
+function creaMiniatura(file){
+  return new Promise(resolve=>{
+    if (!file.type.startsWith('image/')) return resolve(null);
+    const img = new Image(), url = URL.createObjectURL(file);
+    img.onload = ()=>{
+      const max = 400, r = Math.min(1, max/Math.max(img.width,img.height));
+      const c = document.createElement('canvas');
+      c.width = Math.round(img.width*r); c.height = Math.round(img.height*r);
+      c.getContext('2d').drawImage(img,0,0,c.width,c.height);
+      URL.revokeObjectURL(url);
+      c.toBlob(b=>resolve(b),'image/jpeg',0.8);
     };
-    x.onload=()=>x.status===200?res():rej(new Error(x.responseText||'Errore '+x.status));
-    x.onerror=()=>rej(new Error('Errore di rete'));
-    x.send(fd);
+    img.onerror = ()=>{ URL.revokeObjectURL(url); resolve(null); };
+    img.src = url;
   });
 }
 
-async function startUpload(files){
-  files=[...files];
-  if(!files.length) return status('Scegli almeno un file');
-  try{
-    for(let i=0;i<files.length;i++) await uploadOne(files[i],i+1,files.length);
-    status('Upload completato ✅');
-  }catch(e){ status('Errore: '+e.message); }
-  $('progress').style.width='0';
-  refresh();
+async function caricaFiles(list){
+  if (!utente) return showToast('ACCEDI PRIMA',true);
+  for (const file of Array.from(list)) await caricaUno(file);
 }
 
-$('btnUpload').onclick=()=>startUpload($('fileInput').files);
-$('btnRefresh').onclick=refresh;
-const drop=$('drop');
-drop.ondragover=e=>{e.preventDefault();drop.classList.add('over');};
-drop.ondragleave=()=>drop.classList.remove('over');
-drop.ondrop=e=>{e.preventDefault();drop.classList.remove('over');startUpload(e.dataTransfer.files);};
-refresh();
+async function caricaUno(file){
+  const box = document.getElementById('uploads');
+  const el = document.createElement('div');
+  el.className = 'up-item';
+  el.innerHTML = `<div class="up-top"><span></span><span>0%</span></div><div class="bar"><div></div></div>`;
+  el.querySelector('span').textContent = file.name;
+  box.appendChild(el);
+  const pct = el.querySelectorAll('span')[1], bar = el.querySelector('.bar > div');
+
+  try {
+    const uid = utente.uid;
+    const safe = file.name.replace(/[^a-zA-Z0-9._-]/g,'_');
+    const id = Date.now() + '_' + safe;
+    const path = `nas/${uid}/${id}`;
+    const thumbPath = `nas/${uid}/thumbs/${id}.jpg`;
+
+    // 1) originale, identico byte per byte
+    const task = storage.ref(path).put(file, { contentType: file.type, cacheControl: 'private,max-age=31536000' });
+    task.on('state_changed', s=>{
+      const p = Math.round(s.bytesTransferred/s.totalBytes*100);
+      pct.textContent = p+'%'; bar.style.width = p+'%';
+    });
+    await task;
+    const url = await storage.ref(path).getDownloadURL();
+
+    // 2) miniatura
+    let thumbUrl = null;
+    const tb = await creaMiniatura(file);
+    if (tb) {
+      await storage.ref(thumbPath).put(tb, { contentType:'image/jpeg' });
+      thumbUrl = await storage.ref(thumbPath).getDownloadURL();
+    }
+
+    // 3) metadati
+    await db.collection('utenti').doc(uid).collection('nas').add({
+      name: file.name, size: file.size, type: file.type,
+      path, thumbPath: tb ? thumbPath : null,
+      url, thumbUrl, date: Date.now(), lastModified: file.lastModified || null
+    });
+
+    pct.textContent = '✓'; setTimeout(()=>el.remove(),1500);
+  } catch (e) {
+    console.error(e);
+    pct.textContent = '✕'; bar.style.background = 'var(--accent3)';
+    showToast('ERRORE: '+file.name, true);
+  }
+}
+
+// ═══════════════ GRIGLIA ═══════════════
+function renderGrid(){
+  const g = document.getElementById('grid');
+  const tot = files.reduce((a,f)=>a+(f.size||0),0);
+  document.getElementById('stat-count').textContent = files.length + ' file';
+  document.getElementById('stat-size').textContent = fmtSize(tot);
+  if (!files.length) { g.innerHTML = '<div class="empty" style="grid-column:1/-1">Nessun file. Caricane uno qui sopra.</div>'; return; }
+  g.innerHTML = files.map((f,i)=>{
+    const media = f.thumbUrl
+      ? `<img src="${f.thumbUrl}" loading="lazy" alt="">`
+      : `<div class="ico">${(f.type||'').startsWith('video/')?'🎞':'📄'}</div>`;
+    return `<div class="thumb" onclick="apriLB(${i})">${media}<div class="cap">${esc(f.name)}</div></div>`;
+  }).join('');
+}
+function esc(s){ return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+
+// ═══════════════ LIGHTBOX ═══════════════
+function apriLB(i){
+  const f = files[i]; if (!f) return;
+  corrente = f;
+  const isVid = (f.type||'').startsWith('video/');
+  document.getElementById('lb-media').innerHTML = isVid
+    ? `<video src="${f.url}" controls autoplay></video>`
+    : `<img src="${f.url}" alt="">`;
+  document.getElementById('lb-info').textContent =
+    `${f.name} · ${fmtSize(f.size||0)} · ${new Date(f.date).toLocaleString('it-IT')}`;
+  document.getElementById('lb-open').href = f.url;
+  document.getElementById('lightbox').classList.add('show');
+}
+function chiudiLB(){
+  document.getElementById('lightbox').classList.remove('show');
+  document.getElementById('lb-media').innerHTML = '';
+  corrente = null;
+}
+document.addEventListener('keydown',e=>{ if(e.key==='Escape') chiudiLB(); });
+
+async function eliminaCorrente(){
+  if (!corrente || !utente) return;
+  if (!confirm('Eliminare "'+corrente.name+'" per sempre?')) return;
+  const f = corrente;
+  try {
+    await storage.ref(f.path).delete().catch(()=>{});
+    if (f.thumbPath) await storage.ref(f.thumbPath).delete().catch(()=>{});
+    await db.collection('utenti').doc(utente.uid).collection('nas').doc(f.id).delete();
+    chiudiLB(); showToast('ELIMINATO');
+  } catch (e) { console.error(e); showToast('ERRORE ELIMINAZIONE',true); }
+}
 </script>
 </body>
 </html>
-)rawliteral";
-
-// ---------- Utility ----------
-bool auth() {
-  if (!server.authenticate(USER, PASS)) {
-    server.requestAuthentication();
-    return false;
-  }
-  return true;
-}
-
-String cleanName(String n) {
-  int i = max(n.lastIndexOf('/'), n.lastIndexOf('\\'));
-  if (i >= 0) n = n.substring(i + 1);
-  const char bad[] = "\"<>|:*?";
-  for (size_t k = 0; k < sizeof(bad) - 1; k++) n.replace(String(bad[k]), "_");
-  n.trim();
-  if (n.length() == 0 || n.length() > 100 || n[0] == '.') return "";
-  return n;
-}
-
-String jsonEscape(const String& s) {
-  String o;
-  for (size_t i = 0; i < s.length(); i++) {
-    char c = s[i];
-    if (c == '"' || c == '\\') o += '\\';
-    o += c;
-  }
-  return o;
-}
-
-String mimeOf(const String& n) {
-  String l = n; l.toLowerCase();
-  if (l.endsWith(".jpg") || l.endsWith(".jpeg")) return "image/jpeg";
-  if (l.endsWith(".png"))  return "image/png";
-  if (l.endsWith(".gif"))  return "image/gif";
-  if (l.endsWith(".webp")) return "image/webp";
-  if (l.endsWith(".mp4"))  return "video/mp4";
-  if (l.endsWith(".webm")) return "video/webm";
-  if (l.endsWith(".mp3"))  return "audio/mpeg";
-  if (l.endsWith(".wav"))  return "audio/wav";
-  if (l.endsWith(".ogg"))  return "audio/ogg";
-  if (l.endsWith(".pdf"))  return "application/pdf";
-  if (l.endsWith(".txt"))  return "text/plain";
-  return "application/octet-stream";
-}
-
-// ---------- Route ----------
-void handleRoot() {
-  if (!auth()) return;
-  server.send_P(200, "text/html; charset=utf-8", INDEX_HTML);
-}
-
-void handleList() {
-  if (!auth()) return;
-  String j = "{\"total\":" + String((uint64_t)SD.totalBytes()) +
-             ",\"used\":" + String((uint64_t)SD.usedBytes()) + ",\"files\":[";
-  File root = SD.open("/");
-  File f = root.openNextFile();
-  bool first = true;
-  while (f) {
-    String n = f.name();
-    if (!f.isDirectory() && n.length() && n[0] != '.') {
-      if (!first) j += ",";
-      first = false;
-      j += "{\"n\":\"" + jsonEscape(n) + "\",\"s\":" + String((uint32_t)f.size()) + "}";
-    }
-    f = root.openNextFile();
-  }
-  root.close();
-  j += "]}";
-  server.send(200, "application/json", j);
-}
-
-void handleFile() {
-  if (!auth()) return;
-  String n = cleanName(server.arg("n"));
-  if (n == "") { server.send(400, "text/plain", "Nome non valido"); return; }
-  File f = SD.open("/" + n, FILE_READ);
-  if (!f) { server.send(404, "text/plain", "Non trovato"); return; }
-  if (server.hasArg("dl"))
-    server.sendHeader("Content-Disposition", "attachment; filename=\"" + n + "\"");
-  server.streamFile(f, mimeOf(n));
-  f.close();
-}
-
-void handleDelete() {
-  if (!auth()) return;
-  String n = cleanName(server.arg("n"));
-  if (n != "" && SD.remove("/" + n)) server.send(200, "text/plain", "OK");
-  else server.send(400, "text/plain", "Errore");
-}
-
-void handleUploadDone() {
-  if (!uploadOk) { server.send(403, "text/plain", "Non autorizzato o nome non valido"); return; }
-  server.send(200, "text/plain", "OK");
-}
-
-void handleUploadData() {
-  HTTPUpload& u = server.upload();
-  if (u.status == UPLOAD_FILE_START) {
-    uploadOk = false;
-    if (!server.authenticate(USER, PASS)) return;
-    String n = cleanName(u.filename);
-    if (n == "") return;
-    SD.remove("/" + n);
-    upFile = SD.open("/" + n, FILE_WRITE);
-    uploadOk = (bool)upFile;
-  } else if (u.status == UPLOAD_FILE_WRITE) {
-    if (uploadOk && upFile) upFile.write(u.buf, u.currentSize);
-  } else if (u.status == UPLOAD_FILE_END) {
-    if (upFile) upFile.close();
-  } else if (u.status == UPLOAD_FILE_ABORTED) {
-    if (upFile) upFile.close();
-    uploadOk = false;
-  }
-}
-
-// ---------- Setup ----------
-void setup() {
-  Serial.begin(115200);
-  delay(500);
-
-  SPI.begin(SD_SCK, SD_MISO, SD_MOSI, SD_CS);
-  if (!SD.begin(SD_CS, SPI, 20000000)) Serial.println("SD non trovata!");
-
-  WiFi.mode(WIFI_STA);
-  WiFi.begin(WIFI_SSID, WIFI_PASS);
-  Serial.print("Connessione WiFi");
-  uint32_t t0 = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - t0 < 10000) {
-    delay(300);
-    Serial.print(".");
-  }
-  Serial.println();
-
-  if (WiFi.status() == WL_CONNECTED) {
-    Serial.print("Aperto su: http://");
-    Serial.println(WiFi.localIP());
-  } else {
-    WiFi.mode(WIFI_AP);
-    WiFi.softAP(AP_SSID, AP_PASS);
-    Serial.print("Modalità AP, indirizzo: http://");
-    Serial.println(WiFi.softAPIP());
-  }
-
-  if (MDNS.begin("esp-nas")) Serial.println("Anche su: http://esp-nas.local");
-
-  const char* hdrs[] = {"Authorization"};
-  server.collectHeaders(hdrs, 1);
-
-  server.on("/", HTTP_GET, handleRoot);
-  server.on("/api/list", HTTP_GET, handleList);
-  server.on("/api/file", HTTP_GET, handleFile);
-  server.on("/api/del", HTTP_POST, handleDelete);
-  server.on("/api/upload", HTTP_POST, handleUploadDone, handleUploadData);
-  server.begin();
-}
-
-void loop() {
-  server.handleClient();
-}
